@@ -16,3 +16,16 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -q
+      - name: Smoke test against a real `flask run` process
+        run: |
+          uv run flask --app electoral_api:create_app run --port 5057 > flask.log 2>&1 &
+          echo $! > flask.pid
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:5057/health && break
+            sleep 1
+          done
+          status=0
+          uv run python -m electoral_api.smoke_client --url http://127.0.0.1:5057 --voters 100 --seed 1 > /dev/null || status=1
+          uv run python -m electoral_api.smoke_client --url http://127.0.0.1:5057 --voters 100 --seed 2 --quake 0.02 --mode poll --minutes 5 --resync-every 10 > /dev/null || status=1
+          kill $(cat flask.pid)
+          [ $status -eq 0 ] || { cat flask.log; exit 1; }
