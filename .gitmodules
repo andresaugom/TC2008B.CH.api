@@ -1,0 +1,3 @@
+[submodule "model"]
+	path = model
+	url = https://github.com/andresaugom/TC2008B.CH.model.git
