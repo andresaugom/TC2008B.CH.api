@@ -6,7 +6,7 @@ Design spec for the Mesa + REST API + Unity simulation. It builds on the baselin
 
 Model the voting process of one polling station over one election day as a stochastic multi-agent system, run it as a Mesa model exposed through a REST API, and visualize it live in a 3D Unity scene. The simulation must be statistically defensible: every random component is an explicit distribution from the class toolbox, every output has a stated estimator, and results come with replication-based uncertainty.
 
-In scope: voter arrival, collision/priority handling, nominal-list verification, booth, urn, abandonment, invalid documents, the vote itself, metrics, API, 3D visualization.
+In scope: voter arrival, collision/priority handling, nominal-list verification, booth, urn, abandonment, invalid documents, the vote itself, the earthquake external event (5.7), metrics, API, 3D visualization.
 Out of scope for the first demo (see section 11): multiple stations, ballot counting procedures, fraud or irregularity detection, per-resource staff behavior such as breaks.
 
 ## 2. How the class concepts map to the model
@@ -63,7 +63,7 @@ Holds the clock, configuration, queues, resources, event log, metric accumulator
 
 ### 4.4 Voter states
 
-`EN_CAMINO` → `ESPERANDO_VERIFICACION` → `VERIFICANDO` → `ESPERANDO_MAMPARA` → `EN_MAMPARA` → `ESPERANDO_URNA` → `EN_URNA` → `FINALIZADO`, with two terminal side exits: `ABANDONO` (at arrival) and `DOCUMENTO_INVALIDO` (when called to a booth, as in the baseline).
+`EN_CAMINO` → `ESPERANDO_VERIFICACION` → `VERIFICANDO` → `ESPERANDO_MAMPARA` → `EN_MAMPARA` → `ESPERANDO_URNA` → `EN_URNA` → `FINALIZADO`, with two terminal side exits: `ABANDONO` (at arrival) and `DOCUMENTO_INVALIDO` (when called to a booth, as in the baseline). The earthquake (5.7) adds `EVACUADO` (away, will return) and the terminal `ABANDONO_SISMO`.
 
 ## 5. Stochastic components
 
@@ -128,6 +128,12 @@ Decided once, on arrival, using the verification queue length ℓ: probability 0
 
 When a voter starts at the urn, X_i ~ Bernoulli(p_A) with X_i = 1 meaning party A ("Rojo") and 0 meaning party B ("Azul"). The baseline corresponds to p_A = 0.5. The configured p_A is the ground truth that the estimator tries to recover, which makes the demo a controlled experiment: the team can check that p̂ converges to p_A as the number of voters grows.
 
+### 5.7 Earthquake (external event) **[Baseline]**
+
+The baseline file contains an earthquake extension, kept here as an optional external event, **off by default** (`p_earthquake_per_minute: 0`) so that the scenarios above are unchanged. At most one per run. Its minute is drawn once at reset from a geometric distribution (equivalent to the baseline's per-minute Bernoulli test), and only counts if it falls inside the opening window.
+
+When it happens the station is evacuated: every queue and resource is emptied, a vote being cast is voided, and the station stays closed `closure_minutes` (20). Voters arriving while closed leave (`abandon`, reason `closed`). Each evacuee returns with probability `p_return` (0.60) between 1 and 5 minutes after the reopening, and then decides again whether to queue (same abandonment rule); otherwise the evacuee leaves for good (`ABANDONO_SISMO`). Time in station of an evacuee runs from the original arrival to the final exit. The run finishes only after every evacuee has returned or left. The earthquake uses its own random stream, so enabling it does not reshuffle arrivals or voter attributes.
+
 ## 6. Metrics and outputs
 
 The set below is the team's choice. It includes the baseline outputs plus the statistical outputs from the class.
@@ -148,6 +154,7 @@ Wait time and service time at each stage, total time in the station T_i = exit �
 | Throughput | voters completed per hour, and per hour of the day (a turnout profile) |
 | Overrun | last exit time − T (zero when the station copes; large when saturated) |
 | Collisions | number of tied arrivals and priority resolutions |
+| Earthquake | evacuated voters and `abandoned_earthquake` count (outcome rates include it) |
 | Little's law check | L̄ ≈ λ_eff · W̄ per stage (7.3) |
 
 ### 6.3 Election result
@@ -187,6 +194,7 @@ The scenario `S0_baseline` must reproduce the core simulation's statistics (mean
 | S2 midday peak | `instants`, normal | ballot_deposit | bell-shaped demand |
 | S3 opening rush | `instants`, gamma | ballot_deposit | front-loaded demand; most stress on verification |
 | S4 beta profile | `instants`, beta | ballot_deposit | flexible bounded profile |
+| S6 earthquake | default day (`instants`, gamma) | ballot_deposit | the baseline's external event, `p_earthquake_per_minute = 0.001` |
 | S5 capacity sweep | best of S1–S4 | ballot_deposit | vary verifiers (1–5) and booths (1–4) to find the smallest staffing without overrun, the resource-estimation question from the first lecture |
 
 ## 8. Software architecture
@@ -197,7 +205,7 @@ Adopts the course slide's suggestion. Mesa model → serializer → Flask API �
 
 ### 8.2 Mesa model
 
-Mesa advances in steps, while the baseline is event-driven. This spec proposes a time-stepped model with 1 tick = 1 s, in which each voter or verifier holds a countdown and only does work when it expires or when it is being served, so the per-tick cost stays small even over 36,000 ticks. Order within a tick, fixed for determinism: (1) service completions, (2) arrivals scheduled for this tick with collision resolution and abandonment decision, (3) assignment of waiting voters to free resources, (4) event logging and metric sampling. A time-stepped design makes "two arrivals in the same tick" a natural collision. The alternative, keeping the `heapq` core and advancing it to a target clock inside each Mesa step, preserves the baseline exactly but fits Mesa less naturally. **[Open, decide before coding]** Pin the Mesa version in `requirements.txt`, since the API changed between major versions.
+Mesa advances in steps, while the baseline is event-driven. This spec proposes a time-stepped model with 1 tick = 1 s, in which each voter or verifier holds a countdown and only does work when it expires or when it is being served, so the per-tick cost stays small even over 36,000 ticks. Order within a tick, fixed for determinism: (0) external events (earthquake, reopening, evacuees returning), (1) service completions, (2) arrivals scheduled for this tick with collision resolution and abandonment decision, (3) assignment of waiting voters to free resources, (4) event logging and metric sampling. A time-stepped design makes "two arrivals in the same tick" a natural collision. The alternative, keeping the `heapq` core and advancing it to a target clock inside each Mesa step, preserves the baseline exactly but fits Mesa less naturally. **[Open, decide before coding]** Pin the Mesa version in `requirements.txt`, since the API changed between major versions.
 
 Suggested modules: `config.py` (dataclasses and YAML loading), `distributions.py` (a wrapper over numpy/scipy with density, sampler and moments, plus tests), `agents.py`, `model.py`, `metrics.py`, `api.py`, `experiments.py` (replications and scenarios), `tests/`.
 
@@ -239,7 +247,7 @@ Snapshot shape (illustrative):
 }
 ```
 
-Events carry `seq`, `t`, `type`, `voter_id` and the resource when relevant. Types: `arrival`, `collision_resolved`, `abandon`, `start_verification`, `end_verification`, `invalid_document`, `start_booth`, `end_booth`, `start_urn`, `end_urn`, `exit`, `close`. The API never includes an individual's vote.
+Events carry `seq`, `t`, `type`, `voter_id` and the resource when relevant. Types: `arrival`, `collision_resolved`, `abandon`, `start_verification`, `end_verification`, `invalid_document`, `start_booth`, `end_booth`, `start_urn`, `end_urn`, `exit`, `close`, and for the earthquake `earthquake`, `evacuated`, `station_reopened`, `return`. The snapshot adds `station_open` (false while closed by the earthquake) and an `abandoned_earthquake` counter. The API never includes an individual's vote.
 
 ### 8.5 Unity (3D) **[Proposed]**
 
@@ -278,6 +286,10 @@ abandonment:
   rule: queue_fraction            # baseline thresholds as fractions of n
   thresholds: [0.20, 0.40]
   probabilities: [0.10, 0.40, 0.80]
+earthquake:                       # external event, 5.7
+  p_earthquake_per_minute: 0      # 0 = off; scenario S6 uses 0.001
+  closure_minutes: 20
+  p_return: 0.60
 reveal_tally: at_close
 ```
 
